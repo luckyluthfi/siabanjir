@@ -68,7 +68,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
   <div class="login-container">
     <h2>Login</h2>
 
-    <img src="https://www.bildteknik.com/wp-content/uploads/Monitoring-icon.png" alt="App Icon" class="app-icon" />
+    <img src="logobanjir.png" alt="App Icon" class="app-icon" />
 
     <!-- Pesan error -->
     <?php if (!empty($error)): ?>

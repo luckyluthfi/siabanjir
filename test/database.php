@@ -3,8 +3,8 @@ class Database
 {
 	private static $dbName = 'dbsiabanjir'; // Example: private static $dbName = 'myDB';
 	private static $dbHost = 'localhost'; // Example: private static $dbHost = 'localhost';
-	private static $dbUsername = 'root'; // Example: private static $dbUsername = 'myUserName';
-	private static $dbUserPassword = ''; // // Example: private static $dbUserPassword = 'myPassword';
+	private static $dbUsername = 'dbsiabanjir'; // Example: private static $dbUsername = 'myUserName';
+	private static $dbUserPassword = 'dbsiabanjir123'; // // Example: private static $dbUserPassword = 'myPassword';
 
 	private static $cont  = null;
 
