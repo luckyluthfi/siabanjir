@@ -1,0 +1,116 @@
+#include <Arduino.h>
+#include <WiFi.h>
+#include <WiFiClientSecure.h>
+
+// ===== KONFIGURASI WIFI DAN TELEGRAM =====
+const char* ssid = "Pribadi";
+const char* password = "kenarikuning123";
+String BOT_TOKEN = "8560472108:AAHYSPR9PHxInFfof6MlGPND8pydaXasBHQ";
+String CHAT_ID = "5765853734";
+
+// ===== PIN FLOAT SENSOR DAN LED =====
+#define LED_HIJAU 0
+#define LED_BIRU  2
+#define LED_MERAH 4
+#define FLOAT1 13
+#define FLOAT2 12
+#define FLOAT3 14
+
+String lastStatus = "";
+
+// ===== FUNGSI KIRIM PESAN TELEGRAM =====
+void sendTelegramMessage(String message) {
+  WiFiClientSecure client;
+  client.setInsecure();  // Abaikan sertifikat SSL
+
+  if (!client.connect("api.telegram.org", 443)) {
+    Serial.println("❌ Gagal terhubung ke Telegram server!");
+    return;
+  }
+
+  String url = "/bot" + BOT_TOKEN + "/sendMessage?chat_id=" + CHAT_ID + "&text=" + message;
+  Serial.print("🔗 Mengirim: ");
+  Serial.println(url);
+
+  client.println("GET " + url + " HTTP/1.1");
+  client.println("Host: api.telegram.org");
+  client.println("Connection: close");
+  client.println();
+
+  unsigned long timeout = millis();
+  while (client.connected() && millis() - timeout < 5000) {
+    while (client.available()) {
+      String line = client.readStringUntil('\n');
+      if (line.indexOf("\"ok\":true") > 0) {
+        Serial.println("✅ Pesan berhasil dikirim ke Telegram!");
+        return;
+      }
+    }
+  }
+  Serial.println("⚠️ Gagal membaca respon Telegram!");
+}
+
+// ===== SETUP =====
+void setup() {
+  Serial.begin(115200);
+  pinMode(LED_HIJAU, OUTPUT);
+  pinMode(LED_BIRU, OUTPUT);
+  pinMode(LED_MERAH, OUTPUT);
+  pinMode(FLOAT1, INPUT_PULLUP);
+  pinMode(FLOAT2, INPUT_PULLUP);
+  pinMode(FLOAT3, INPUT_PULLUP);
+
+  Serial.println("\n📡 Menghubungkan ke WiFi...");
+  WiFi.begin(ssid, password);
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println("\n✅ WiFi Terhubung!");
+  Serial.println(WiFi.localIP());
+
+  sendTelegramMessage("🚀 ESP32 Monitoring Ketinggian Air Hulu AKTIF");
+}
+
+// ===== LOOP =====
+void loop() {
+  bool s1 = digitalRead(FLOAT1);
+  bool s2 = digitalRead(FLOAT2);
+  bool s3 = digitalRead(FLOAT3);
+  String currentStatus = "";
+
+  if (s3 == LOW) {
+    // Level tertinggi: BAHAYA
+    digitalWrite(LED_MERAH, HIGH);
+    digitalWrite(LED_BIRU, LOW);
+    digitalWrite(LED_HIJAU, LOW);
+    currentStatus = "BAHAYA 🚨";
+  } 
+  else if (s2 == LOW) {
+    // Level menengah: SIAGA
+    digitalWrite(LED_MERAH, LOW);
+    digitalWrite(LED_BIRU, HIGH);
+    digitalWrite(LED_HIJAU, LOW);
+    currentStatus = "SIAGA ⚠️";
+  } 
+  else if (s1 == LOW) {
+    // Level rendah: AMAN
+    digitalWrite(LED_MERAH, LOW);
+    digitalWrite(LED_BIRU, LOW);
+    digitalWrite(LED_HIJAU, HIGH);
+    currentStatus = "AMAN ✅";
+  } 
+  
+  // Kirim notifikasi hanya untuk SIAGA & BAHAYA
+  if (currentStatus != lastStatus) {
+    Serial.println("Status berubah: " + currentStatus);
+
+    if (currentStatus == "SIAGA ⚠️" || currentStatus == "BAHAYA 🚨") {
+      sendTelegramMessage("🔔 PERINGATAN: Ketinggian Air " + currentStatus);
+    }
+
+    lastStatus = currentStatus;
+  }
+
+  delay(1000);
+}
