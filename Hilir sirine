@@ -1,0 +1,366 @@
+/* ESP32 Flood Monitor - Final
+   - Float sensors primary (NO): FLOAT1=13, FLOAT2=12, FLOAT3=14
+   - Ultrasonic A02YYUW on UART2 (RX=16, TX=17) as backup check
+   - LEDs: HIJAU=0, BIRU=2, MERAH=4
+   - Relay sirine: RELAY=5
+   - Sirine patterns:
+       BAHAYA: ON 10s, OFF 1s  x5
+       SIAGA : ON  3s, OFF 1s  x5
+*/
+
+#include <Arduino.h>
+#include <WiFi.h>
+#include <WiFiClientSecure.h>
+#include <HTTPClient.h>
+#include <HardwareSerial.h>
+#include <time.h>
+
+// pins
+#define PIN_RX 16
+#define PIN_TX 17
+
+#define LED_HIJAU 0
+#define LED_BIRU  2
+#define LED_MERAH 4
+#define RELAY     5
+
+#define FLOAT1 13  // bottom / AMAN (NO)
+#define FLOAT2 12  // middle / SIAGA (NO)
+#define FLOAT3 14  // top / BAHAYA (NO)
+
+HardwareSerial Ultrasonic_Sensor(2);
+
+// wifi & server
+const char* SSID     = "Pribadi";
+const char* PASSWORD = "kenarikuning123";
+
+String BOT_TOKEN = "8560472108:AAHYSPR9PHxInFfof6MlGPND8pydaXasBHQ";
+String CHAT_ID   = "5765853734";
+String serverURL = "http://192.168.1.106/web_siabanjir/inserthilir.php";
+
+// intervals
+const unsigned long UPLOAD_INTERVAL_MS = 2000UL;
+const unsigned long FLOAT_DEBOUNCE_MS  = 200UL;
+const unsigned long WIFI_RECONNECT_MS  = 10000UL;
+const unsigned long HTTP_TIMEOUT_MS    = 7000UL;
+
+// globals
+int distance = 9999;
+unsigned char data_buffer[4];
+unsigned char CS;
+
+String lastStatus = "";
+unsigned long lastSend = 0;
+unsigned long lastWifiCheck = 0;
+
+// float debounce
+int floatStable1 = HIGH, floatStable2 = HIGH, floatStable3 = HIGH;
+int floatLastRaw1 = HIGH, floatLastRaw2 = HIGH, floatLastRaw3 = HIGH;
+unsigned long floatLastChange1 = 0, floatLastChange2 = 0, floatLastChange3 = 0;
+
+// siren state (non-blocking)
+bool sirenRunning = false;
+int sirenCount = 0;
+bool sirenOn = false;
+unsigned long sirenLastMillis = 0;
+unsigned long sirenOnDuration = 0;
+
+// helper: init NTP (GMT+7)
+void initTime() {
+  configTime(25200, 0, "pool.ntp.org", "time.google.com");
+  struct tm ti;
+  unsigned long start = millis();
+  while (!getLocalTime(&ti) && millis() - start < 8000) {
+    delay(200);
+  }
+}
+
+String getTimestamp() {
+  struct tm ti;
+  if (!getLocalTime(&ti)) return "1970-01-01 00:00:00";
+  char buf[25];
+  strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", &ti);
+  return String(buf);
+}
+
+// WiFi reconnect helper
+void ensureWiFiConnected() {
+  if (WiFi.status() == WL_CONNECTED) return;
+  unsigned long now = millis();
+  if (now - lastWifiCheck < WIFI_RECONNECT_MS) return;
+  lastWifiCheck = now;
+  Serial.println("WiFi not connected. Trying to reconnect...");
+  WiFi.disconnect(true);
+  WiFi.begin(SSID, PASSWORD);
+  unsigned long start = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - start < 8000) {
+    delay(200);
+    Serial.print(".");
+  }
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.println("\nWiFi reconnected: " + WiFi.localIP().toString());
+  } else {
+    Serial.println("\nWiFi reconnect failed");
+  }
+}
+
+// Telegram (simple, insecure client)
+void sendTelegramMessage(const String &msg) {
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("[TG] skip (no wifi)");
+    return;
+  }
+  WiFiClientSecure client;
+  client.setInsecure();
+  HTTPClient https;
+  String url = "https://api.telegram.org/bot" + BOT_TOKEN + "/sendMessage";
+  https.begin(client, url);
+  https.addHeader("Content-Type", "application/x-www-form-urlencoded");
+  String body = "chat_id=" + CHAT_ID + "&text=" + msg;
+  int code = https.POST(body);
+  Serial.printf("[TG] code=%d\n", code);
+  https.end();
+}
+
+// Upload JSON to server
+bool uploadToServer(int dist, const String &status, const String &timestamp) {
+  ensureWiFiConnected();
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("[UPLOAD] skip (no wifi)");
+    return false;
+  }
+  HTTPClient http;
+  http.begin(serverURL);
+  http.addHeader("Content-Type", "application/json");
+  http.setTimeout(HTTP_TIMEOUT_MS);
+  String json = "{\"distance\":" + String(dist) + ",\"status\":\"" + status + "\",\"timestamp\":\"" + timestamp + "\"}";
+  int httpCode = http.POST(json);
+  String resp = http.getString();
+  Serial.println("[UPLOAD] code=" + String(httpCode) + " resp=" + resp);
+  http.end();
+  return (httpCode >= 200 && httpCode < 300);
+}
+
+// Read ultrasonic (A02YYUW over UART)
+void baca_kethilir() {
+  if (Ultrasonic_Sensor.available() > 0) {
+ 
+    delay(4);
+ 
+    // Check for packet header character 0xff
+    if (Ultrasonic_Sensor.read() == 0xff) 
+    {
+      // Insert header into array
+      data_buffer[0] = 0xff;
+      // Read remaining 3 characters of data and insert into array
+      for (int i = 1; i < 4; i++) { // 4 untuk a02yyuw
+        data_buffer[i] = Ultrasonic_Sensor.read();
+      }
+ 
+      //Compute checksum
+      CS = data_buffer[0] + data_buffer[1] + data_buffer[2];
+      // If checksum is valid compose distance from data
+      if (data_buffer[3] == CS) {
+        distance = (data_buffer[1] << 8) + data_buffer[2]; // 8 a02yyuw
+        // Print to serial monitor
+     distance= distance / 10; //cm
+ 
+      }
+    }
+  }
+ 
+}
+
+// Debounce floats (NO type: LOW = water)
+int readDebouncedFloats() {
+  int r1 = digitalRead(FLOAT1);
+  int r2 = digitalRead(FLOAT2);
+  int r3 = digitalRead(FLOAT3);
+  unsigned long now = millis();
+
+  if (r1 != floatLastRaw1) { floatLastChange1 = now; floatLastRaw1 = r1; }
+  else if (now - floatLastChange1 >= FLOAT_DEBOUNCE_MS && floatStable1 != floatLastRaw1) { floatStable1 = floatLastRaw1; }
+
+  if (r2 != floatLastRaw2) { floatLastChange2 = now; floatLastRaw2 = r2; }
+  else if (now - floatLastChange2 >= FLOAT_DEBOUNCE_MS && floatStable2 != floatLastRaw2) { floatStable2 = floatLastRaw2; }
+
+  if (r3 != floatLastRaw3) { floatLastChange3 = now; floatLastRaw3 = r3; }
+  else if (now - floatLastChange3 >= FLOAT_DEBOUNCE_MS && floatStable3 != floatLastRaw3) { floatStable3 = floatLastRaw3; }
+
+  // normalize: 1 = water detected (LOW), 0 = no water (HIGH)
+  int f1 = (floatStable1 == LOW) ? 1 : 0;
+  int f2 = (floatStable2 == LOW) ? 1 : 0;
+  int f3 = (floatStable3 == LOW) ? 1 : 0;
+
+  return (f1 << 0) | (f2 << 1) | (f3 << 2);
+}
+
+// Interpret float bitmask -> status (priority: F3 > F2 > F1)
+String evaluateStatusFromFloats(int bitmask) {
+  if (bitmask & (1 << 2)) return "BAHAYA";
+  if (bitmask & (1 << 1)) return "SIAGA";
+  if (bitmask & (1 << 0)) return "AMAN";
+  return "AMAN"; // if none active treat as AMAN
+}
+
+// Interpret ultrasonic reading -> status
+String evaluateStatusFromUltrasonic(int dist) {
+  if (dist >= 0 && dist <= 149) return "BAHAYA";
+  if (dist >= 150 && dist <= 199) return "SIAGA";
+  if (dist >= 200 && dist <= 500) return "AMAN";
+  return "TIDAK VALID";
+}
+
+// Final decision: Float primary; ultrasonic can override only if more severe
+String finalDecision(const String &floatStatus, const String &ultraStatus) {
+  // if ultrasonic more severe than float, override
+  if (ultraStatus == "BAHAYA" && floatStatus != "BAHAYA") return "BAHAYA";
+  if (ultraStatus == "SIAGA" && floatStatus == "AMAN") return "SIAGA";
+  // else float remains authoritative
+  return floatStatus;
+}
+
+// Siren handler (non-blocking): BAHAYA: ON 10s / OFF 1s x5, SIAGA: ON 3s / OFF 1s x5
+void handleSiren(const String &level) {
+  unsigned long now = millis();
+
+  if (level == "AMAN" || level == "TIDAK VALID") {
+    // reset and ensure off
+    digitalWrite(RELAY, LOW);
+    sirenRunning = false;
+    sirenCount = 0;
+    sirenOn = false;
+    return;
+  }
+
+  // determine onDuration
+  if (!sirenRunning) {
+    sirenRunning = true;
+    sirenCount = 0;
+    sirenOn = false;
+    sirenLastMillis = millis();
+  }
+
+  if (sirenCount >= 5) {
+    // finished sequence
+    digitalWrite(RELAY, LOW);
+    sirenRunning = false;
+    return;
+  }
+
+  unsigned long onDur = (level == "BAHAYA") ? 10000UL : 3000UL; // ms
+  unsigned long offDur = 1000UL;
+
+  if (!sirenOn) {
+    // currently in OFF period; wait offDur then turn ON
+    if (now - sirenLastMillis >= offDur) {
+      digitalWrite(RELAY, HIGH);
+      sirenOn = true;
+      sirenLastMillis = now;
+    }
+  } else {
+    // currently in ON period; wait onDur then turn OFF and increment count
+    if (now - sirenLastMillis >= onDur) {
+      digitalWrite(RELAY, LOW);
+      sirenOn = false;
+      sirenLastMillis = now;
+      sirenCount++;
+    }
+  }
+}
+
+// Telegram & anti-spam: send only when status changed
+void sendTelegramIfChanged(const String &status, int dist) {
+  static String lastSent = "";
+  if (status != lastSent) {
+    String msg = String("🔔 STATUS: ") + status + "\nDistance: " + String(dist) + " cm\nTime: " + getTimestamp();
+    sendTelegramMessage(msg);
+    lastSent = status;
+  }
+}
+
+void setup() {
+  Serial.begin(115200);
+
+  pinMode(LED_HIJAU, OUTPUT);
+  pinMode(LED_BIRU, OUTPUT);
+  pinMode(LED_MERAH, OUTPUT);
+  pinMode(RELAY, OUTPUT);
+
+  pinMode(FLOAT1, INPUT_PULLUP);
+  pinMode(FLOAT2, INPUT_PULLUP);
+  pinMode(FLOAT3, INPUT_PULLUP);
+
+  WiFi.begin(SSID, PASSWORD);
+  initTime();
+  Ultrasonic_Sensor.begin(9600, SERIAL_8N1, PIN_RX, PIN_TX);
+
+  // init floats stable states
+  floatStable1 = digitalRead(FLOAT1);
+  floatStable2 = digitalRead(FLOAT2);
+  floatStable3 = digitalRead(FLOAT3);
+  floatLastRaw1 = floatStable1;
+  floatLastRaw2 = floatStable2;
+  floatLastRaw3 = floatStable3;
+
+  lastSend = millis();
+
+  if (WiFi.status() == WL_CONNECTED) {
+    sendTelegramMessage("🚀 ESP32 Hilir - System Started (" + WiFi.localIP().toString() + ")");
+  } else {
+    Serial.println("WiFi not connected at boot; will reconnect in background.");
+  }
+}
+
+void loop() {
+  ensureWiFiConnected();
+
+  // read sensors
+  baca_kethilir();               // updates 'distance' when frames arrive
+  int floatMask = readDebouncedFloats();
+  String floatStatus = evaluateStatusFromFloats(floatMask);
+  String ultraStatus = evaluateStatusFromUltrasonic(distance);
+  String finalStatus = finalDecision(floatStatus, ultraStatus);
+
+  // LED update
+  if (finalStatus == "BAHAYA") {
+    digitalWrite(LED_MERAH, HIGH);
+    digitalWrite(LED_BIRU, LOW);
+    digitalWrite(LED_HIJAU, LOW);
+  } else if (finalStatus == "SIAGA") {
+    digitalWrite(LED_MERAH, LOW);
+    digitalWrite(LED_BIRU, HIGH);
+    digitalWrite(LED_HIJAU, LOW);
+  } else {
+    digitalWrite(LED_MERAH, LOW);
+    digitalWrite(LED_BIRU, LOW);
+    digitalWrite(LED_HIJAU, HIGH);
+  }
+
+  // siren (non-blocking)
+  handleSiren(finalStatus);
+
+  // debug serial
+  Serial.printf("Dist:%d cm | Float:%s | Ultra:%s | Final:%s\n",
+                distance, floatStatus.c_str(), ultraStatus.c_str(), finalStatus.c_str());
+
+  // telegram on change (includes AMAN)
+  sendTelegramIfChanged(finalStatus, distance);
+
+  // upload immediately if changed
+  if (finalStatus != lastStatus) {
+    String ts = getTimestamp();
+    uploadToServer(distance, finalStatus, ts);
+    lastStatus = finalStatus;
+    lastSend = millis();
+  }
+
+  // periodic upload
+  if (millis() - lastSend >= UPLOAD_INTERVAL_MS) {
+    uploadToServer(distance, finalStatus, getTimestamp());
+    lastSend = millis();
+  }
+
+  // small cooperative yield
+  delay(30);
+}
