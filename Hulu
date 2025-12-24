@@ -39,12 +39,12 @@ String cuaca = "Berawan";
 HardwareSerial Ultrasonic_Sensor(2);
 
 /* ================= WIFI & SERVER ================= */
-const char* SSID     = "Pribadi";
-const char* PASSWORD = "kenarikuning123";
+const char* SSID     = "*****";
+const char* PASSWORD = "*****";
 
-String BOT_TOKEN = "8560472108:AAHYSPR9PHxInFfof6MlGPND8pydaXasBHQ";
-String CHAT_ID   = "5765853734";
-String serverURL = "http://192.168.1.106/web_siabanjir/inserthulu.php";
+String BOT_TOKEN = "8********8:AA*******fof6MlGPND**********Q";
+String CHAT_ID   = "5********4";
+String serverURL = "http://192.1**.1.1**/web_name/inserthulu.php";
 
 /* ================= GLOBAL ================= */
 int distance = 9999;
