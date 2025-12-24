@@ -31,12 +31,12 @@
 HardwareSerial Ultrasonic_Sensor(2);
 
 // wifi & server
-const char* SSID     = "Pribadi";
-const char* PASSWORD = "kenarikuning123";
+const char* SSID     = ".....";
+const char* PASSWORD = ".....";
 
-String BOT_TOKEN = "8560472108:AAHYSPR9PHxInFfof6MlGPND8pydaXasBHQ";
-String CHAT_ID   = "5765853734";
-String serverURL = "http://192.168.1.106/web_siabanjir/inserthilir.php";
+String BOT_TOKEN = "8********:AA******HxInFfof6M*****daXasBHQ";
+String CHAT_ID   = "4*********";
+String serverURL = "http://192.**.*.***/web_siabanjir/inserthilir.php";
 
 // intervals
 const unsigned long UPLOAD_INTERVAL_MS = 2000UL;
