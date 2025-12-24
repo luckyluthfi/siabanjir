@@ -1,0 +1,280 @@
+/* ============================================================
+   ESP32 Flood Monitor - FINAL (FIX COMPILE)
+   JSON: distance, status, cuaca, timestamp
+   ============================================================ */
+
+#include <Arduino.h>
+#include <WiFi.h>
+#include <WiFiClientSecure.h>
+#include <HTTPClient.h>
+#include <HardwareSerial.h>
+#include <Wire.h>
+#include "RTClib.h"
+
+/* ================= RTC ================= */
+RTC_DS3231 rtc;
+DateTime now;
+
+/* ================= RAIN GAUGE ================= */
+const int pin_interrupt = 33;
+volatile bool flag = false;
+
+long int jumlah_tip = 0;
+float milimeter_per_tip = 0.70;
+float curah_hujan_hari_ini = 0.00;
+String cuaca = "Berawan";
+
+/* ================= PIN ================= */
+#define PIN_RX 16
+#define PIN_TX 17
+
+#define LED_HIJAU 0
+#define LED_BIRU  2
+#define LED_MERAH 4
+
+#define FLOAT1 13
+#define FLOAT2 12
+#define FLOAT3 14
+
+HardwareSerial Ultrasonic_Sensor(2);
+
+/* ================= WIFI & SERVER ================= */
+const char* SSID     = "Pribadi";
+const char* PASSWORD = "kenarikuning123";
+
+String BOT_TOKEN = "8560472108:AAHYSPR9PHxInFfof6MlGPND8pydaXasBHQ";
+String CHAT_ID   = "5765853734";
+String serverURL = "http://192.168.1.106/web_siabanjir/inserthulu.php";
+
+/* ================= GLOBAL ================= */
+int distance = 9999;
+String lastStatus = "";
+
+/* ================= ULTRASONIC VAR ================= */
+uint8_t data_buffer[4];
+uint8_t CS = 0;
+
+/* ================= FLOAT DEBOUNCE ================= */
+#define FLOAT_DEBOUNCE_MS 50
+
+int floatLastRaw1 = HIGH, floatLastRaw2 = HIGH, floatLastRaw3 = HIGH;
+int floatStable1 = HIGH,  floatStable2 = HIGH,  floatStable3 = HIGH;
+unsigned long floatLastChange1 = 0;
+unsigned long floatLastChange2 = 0;
+unsigned long floatLastChange3 = 0;
+
+/* ================= INTERRUPT ================= */
+void IRAM_ATTR hitung_curah_hujan() {
+  flag = true;
+}
+
+/* ================= RTC ================= */
+String getRTCTimestamp() {
+  now = rtc.now();
+  char buf[25];
+  sprintf(buf, "%04d-%02d-%02d %02d:%02d:%02d",
+          now.year(), now.month(), now.day(),
+          now.hour(), now.minute(), now.second());
+  return String(buf);
+}
+
+/* ================= RAIN PROCESS ================= */
+void baca_hujan() {
+  if (flag) {
+    jumlah_tip++;
+    curah_hujan_hari_ini = jumlah_tip * milimeter_per_tip;
+    flag = false;
+  }
+
+  if (curah_hujan_hari_ini <= 0.5) cuaca = "Berawan";
+  else if (curah_hujan_hari_ini <= 20) cuaca = "Hujan Ringan";
+  else if (curah_hujan_hari_ini <= 50) cuaca = "Hujan Sedang";
+  else if (curah_hujan_hari_ini <= 100) cuaca = "Hujan Lebat";
+  else cuaca = "Hujan Ekstrem";
+}
+
+/* ================= TELEGRAM ================= */
+void sendTelegramMessage(const String &msg) {
+  if (WiFi.status() != WL_CONNECTED) return;
+
+  WiFiClientSecure client;
+  client.setInsecure();
+  HTTPClient https;
+
+  https.begin(client, "https://api.telegram.org/bot" + BOT_TOKEN + "/sendMessage");
+  https.addHeader("Content-Type", "application/x-www-form-urlencoded");
+  https.POST("chat_id=" + CHAT_ID + "&text=" + msg);
+  https.end();
+}
+
+/* ================= HTTP UPLOAD (FIXED) ================= */
+bool uploadToServer(int dist, const String &status,
+                    const String &cuaca, const String &timestamp) {
+
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("❌ WiFi not connected");
+    return false;
+  }
+
+  WiFiClient client;
+  HTTPClient http;
+
+  http.begin(client, serverURL);
+  http.addHeader("Content-Type", "application/json");
+
+  String json = "{";
+  json += "\"distance\":" + String(dist) + ",";
+  json += "\"status\":\"" + status + "\",";
+  json += "\"cuaca\":\"" + cuaca + "\",";
+  json += "\"timestamp\":\"" + timestamp + "\"";
+  json += "}";
+
+  Serial.println("SEND JSON:");
+  Serial.println(json);
+
+  int httpCode = http.POST(json);
+
+  Serial.print("HTTP CODE: ");
+  Serial.println(httpCode);
+
+  if (httpCode > 0) {
+    Serial.println("RESPONSE:");
+    Serial.println(http.getString());
+  }
+
+  http.end();
+  return (httpCode >= 200 && httpCode < 300);
+}
+
+/* ================= ULTRASONIC ================= */
+void baca_kethilir() {
+  if (Ultrasonic_Sensor.available() >= 4) {
+    if (Ultrasonic_Sensor.read() == 0xFF) {
+      data_buffer[0] = 0xFF;
+      for (int i = 1; i < 4; i++) {
+        data_buffer[i] = Ultrasonic_Sensor.read();
+      }
+
+      CS = data_buffer[0] + data_buffer[1] + data_buffer[2];
+      if (data_buffer[3] == CS) {
+        distance = ((data_buffer[1] << 8) + data_buffer[2]) / 10;
+      }
+    }
+  }
+}
+
+/* ================= FLOAT SENSOR ================= */
+int readDebouncedFloats() {
+  int r1 = digitalRead(FLOAT1);
+  int r2 = digitalRead(FLOAT2);
+  int r3 = digitalRead(FLOAT3);
+
+  unsigned long nowMillis = millis();
+
+  if (r1 != floatLastRaw1) { floatLastChange1 = nowMillis; floatLastRaw1 = r1; }
+  else if (nowMillis - floatLastChange1 >= FLOAT_DEBOUNCE_MS) floatStable1 = floatLastRaw1;
+
+  if (r2 != floatLastRaw2) { floatLastChange2 = nowMillis; floatLastRaw2 = r2; }
+  else if (nowMillis - floatLastChange2 >= FLOAT_DEBOUNCE_MS) floatStable2 = floatLastRaw2;
+
+  if (r3 != floatLastRaw3) { floatLastChange3 = nowMillis; floatLastRaw3 = r3; }
+  else if (nowMillis - floatLastChange3 >= FLOAT_DEBOUNCE_MS) floatStable3 = floatLastRaw3;
+
+  int f1 = (floatStable1 == LOW) ? 1 : 0;
+  int f2 = (floatStable2 == LOW) ? 1 : 0;
+  int f3 = (floatStable3 == LOW) ? 1 : 0;
+
+  return (f1 << 0) | (f2 << 1) | (f3 << 2);
+}
+
+String evaluateStatusFromFloats(int bitmask) {
+  if (bitmask & (1 << 2)) return "BAHAYA";
+  if (bitmask & (1 << 1)) return "SIAGA";
+  if (bitmask & (1 << 0)) return "AMAN";
+  return "AMAN";
+}
+
+String evaluateStatusFromUltrasonic(int dist) {
+  if (dist >= 0 && dist <= 249) return "BAHAYA";
+  if (dist >= 250 && dist <= 299) return "SIAGA";
+  if (dist >= 300 && dist <= 700) return "AMAN";
+  return "TIDAK VALID";
+}
+
+String finalDecision(const String &floatStatus, const String &ultraStatus) {
+  if (ultraStatus == "BAHAYA") return "BAHAYA";
+  if (ultraStatus == "SIAGA" && floatStatus == "AMAN") return "SIAGA";
+  return floatStatus;
+}
+
+/* ================= SETUP ================= */
+void setup() {
+  Serial.begin(115200);
+
+  pinMode(LED_HIJAU, OUTPUT);
+  pinMode(LED_BIRU, OUTPUT);
+  pinMode(LED_MERAH, OUTPUT);
+
+  pinMode(FLOAT1, INPUT_PULLUP);
+  pinMode(FLOAT2, INPUT_PULLUP);
+  pinMode(FLOAT3, INPUT_PULLUP);
+
+  pinMode(pin_interrupt, INPUT_PULLUP);
+  attachInterrupt(digitalPinToInterrupt(pin_interrupt), hitung_curah_hujan, FALLING);
+
+  Wire.begin();
+  rtc.begin();
+	//rtc.adjust(DateTime(F(__DATE__), F(__TIME__))); // Set waktu langsung dari waktu PC
+  //rtc.adjust(DateTime(2025, 12, 23, 17, 5, 40)); // Set Tahun, bulan, tanggal, jam, menit, detik secara manual
+  
+  WiFi.begin(SSID, PASSWORD);
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println("\nWiFi Connected");
+
+  Ultrasonic_Sensor.begin(9600, SERIAL_8N1, PIN_RX, PIN_TX);
+
+  floatStable1 = digitalRead(FLOAT1);
+  floatStable2 = digitalRead(FLOAT2);
+  floatStable3 = digitalRead(FLOAT3);
+
+  sendTelegramMessage("🚀 ESP32 Hulu - System Started (" + WiFi.localIP().toString() + ")");
+}
+
+/* ================= LOOP ================= */
+void loop() {
+  baca_kethilir();
+  baca_hujan();
+
+  int floatMask = readDebouncedFloats();
+  String floatStatus = evaluateStatusFromFloats(floatMask);
+  String ultraStatus = evaluateStatusFromUltrasonic(distance);
+  String status = finalDecision(floatStatus, ultraStatus);
+
+  digitalWrite(LED_MERAH, LOW);
+  digitalWrite(LED_BIRU, LOW);
+  digitalWrite(LED_HIJAU, LOW);
+
+  if (status == "BAHAYA") digitalWrite(LED_MERAH, HIGH);
+  else if (status == "SIAGA") digitalWrite(LED_BIRU, HIGH);
+  else digitalWrite(LED_HIJAU, HIGH);
+
+  if (status != lastStatus) {
+    sendTelegramMessage(
+      "STATUS: " + status +
+      "\nDistance: " + String(distance) + " cm" +
+      "\nCuaca: " + cuaca +
+      "\nTime: " + getRTCTimestamp()
+    );
+
+    uploadToServer(distance, status, cuaca, getRTCTimestamp());
+    lastStatus = status;
+  }
+
+  Serial.printf("Dist:%d | Status:%s | Cuaca:%s | Hujan:%.2f mm\n",
+                distance, status.c_str(), cuaca.c_str(), curah_hujan_hari_ini);
+
+  delay(100);
+}
